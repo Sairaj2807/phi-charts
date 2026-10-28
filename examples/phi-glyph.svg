@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="128" height="128" fill="none">
+  <!-- PHI symbol only: a ring crossed by a vertical bar. Square viewBox, so
+       height alone sizes it. -->
+  <circle cx="50" cy="50" r="29" stroke="#FFFFFF" stroke-width="10"/>
+  <rect x="45" y="0" width="10" height="100" rx="5" fill="#FFFFFF"/>
+</svg>

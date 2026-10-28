@@ -1,0 +1,21 @@
+PHI CHARTS
+Copyright 2026 PHI CHARTS contributors
+
+This product is a modified version of OpenAlgo Charts, which includes software
+developed as part of the OpenAlgo project.
+Copyright 2026 OpenAlgo
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Changes: the project was renamed to PHI CHARTS, and the OpenAlgo REST,
+WebSocket, live and trade feed adapters, the OpenAlgo-specific demos and the
+OpenAlgo branding and logo artwork were removed.
+
+This is original, clean-room code with no third-party charting library
+dependencies. Should any third-party (Apache-2.0 or compatibly licensed)
+routine ever be incorporated, its copyright/license headers will be preserved
+and an attribution to its original authors will be added to this file.

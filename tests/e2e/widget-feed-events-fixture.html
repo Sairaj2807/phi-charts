@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Event details</title><style>
+html, body { margin: 0; height: 100%; background: #131722; }
+#host { position: absolute; inset: 0; }
+</style></head>
+<body><div id="host"></div><script type="module">
+import { createWidget } from '/dist/phi-charts.widget.mjs';
+
+// The spec answers /api/v1/history itself: a host feed is only a getBars that
+// maps its rows to bars.
+const feed = {
+  async getBars() {
+    const response = await fetch('/api/v1/history', { method: 'POST' });
+    const { data } = await response.json();
+    return data.map(row => ({ time: row.timestamp, open: row.open, high: row.high, low: row.low, close: row.close, volume: row.volume }));
+  },
+};
+const actions = [];
+const widget = createWidget('#host', {
+  feed, symbol: 'RELIANCE', exchange: 'NSE', interval: '1d', persist: false,
+  now: () => Date.UTC(2026, 8, 30, 10),
+  eventDetails: {
+    actions: event => event.type === 'earnings' ? [{ label: 'Add to watchlist', run: shown => actions.push(shown.id) }] : [],
+  },
+});
+window.__feedEvents = { widget, actions };
+</script></body></html>

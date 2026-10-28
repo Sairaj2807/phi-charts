@@ -1,0 +1,175 @@
+---
+title: Live Data
+description: History, realtime ticks and candle assembly behind the DataFeed interface.
+---
+
+import { Callout } from 'nextra/components'
+
+# Live data
+
+The chart's market data depends only on the `DataFeed` interface, so any source fits behind
+a small adapter you write ([Custom Data Feeds](/docs/data-feeds)). Order entry is a separate
+contract, the trade tier's `OrderFeed` that its `OrderEngine` drives ([Trading](/docs/trading)),
+which a chart without trading never needs.
+
+## Historical bars
+
+```ts
+const day = 86400;
+const bars = await feed.getBars({
+  symbol: 'RELIANCE', exchange: 'NSE', interval: '1m',
+  from: Math.floor(Date.now() / 1000) - 7 * day,
+  to: Math.floor(Date.now() / 1000),
+});
+series.setData(bars);
+```
+
+`from` / `to` are **UTC seconds**. Convert them to whatever your provider expects inside the
+adapter, and normalize returned timestamps back to UTC seconds before they reach the chart.
+
+## Explicit bar confirmation
+
+Native series accept optional confirmation metadata. Use it when your provider
+knows whether the latest bar is still forming, especially for tick-count or
+volume-driven bars whose close cannot be inferred from a clock.
+
+```ts
+series.setData(bars, { confirmation: 'forming' });
+series.update(latestBar, { confirmation: 'confirmed' });
+series.update(latestBar, { confirmation: 'auto' });
+series.update(correctedBar, { source: 'history' });
+```
+
+`forming` and `confirmed` override interval inference. A confirmation-only update
+is sufficient to recalculate indicators; OHLC values need not change. Same-time
+updates retain an explicit state unless replaced or cleared with `auto`. A new
+tail, replacement dataset, or changed instrument/timeframe clears old metadata.
+Prepending history retains confirmation for an unchanged tail. An older-bar
+correction cannot change the current tail's confirmation.
+
+`setData` is always a historical replacement, even if all timestamps match the
+previous dataset. `update` is live by default; use `source: 'history'` for a
+historical tail correction or append. Updates to older timestamps are historical
+automatically. Replay supplies its own forming/completed state and restores the
+saved data and confirmation when stopped. Historical loads and replay do not
+trigger native live indicator alerts.
+
+## Realtime ticks
+
+Feed your stream's ticks through a `CandleBuilder` and call `series.update()`:
+
+```ts
+import { CandleBuilder } from 'phi-charts';
+
+const builder = new CandleBuilder({ intervalSec: 60, volumeMode: 'ltq-sum' });
+// Continue the bucket history already ended in, rather than opening a new one.
+if (bars.length) builder.seed(bars[bars.length - 1]);
+
+const stopTicks = myStream.onTick((tick) => {
+  const time = tick.timeSec > 0 ? tick.timeSec : Math.floor(Date.now() / 1000);
+  const u = builder.onTick({ time, price: tick.price, ltq: tick.quantity });
+  if (u) series.update(u.bar);
+});
+
+function disposeChart() {
+  stopTicks();
+  chart.destroy();
+}
+```
+
+**Seed the builder**, and seed it again after every reconnect. History normally ends
+*inside* the bar currently forming. An unseeded builder has no current bar, so its first
+tick opens a fresh one for that same bucket, which opens at whatever tick price arrived
+first instead of the bucket's true open, and restarts its volume at zero. `seed` hands it
+the last historical bar so ticks fold into it instead.
+
+If you keep your own bar array and push the builder's output into it, an unseeded builder
+also leaves you two entries for that time. `setData` de-duplicates by time as of 1.0.12
+(keeping the later bar), so it no longer draws two candles on top of each other, but the
+open is still wrong until the bucket rolls over. Seeding is the actual fix.
+
+When history stops one bucket short of the one forming, the seed is an older bar and
+the first tick still opens the current bucket at its own price. The builder knows: the
+update carries `provisional: true`, and `builder.reconcile(bar)` adopts the open
+history reports once a refresh brings it (the extremes widen, the volume takes the
+larger value, the close stays with the ticks). `DataLoadingController.pushBar(bar, { provisional: true })` keeps that open across
+later ticks. After a reconnect, reseed with `builder.seed(builder.current())` so the
+bucket opened after the gap is provisional too, then refresh.
+
+## A combined live feed
+
+A feed that implements both `getBars` and `subscribeBars` gives the chart a history that
+joins live data without a seam:
+
+```ts
+const bars = await live.getBars({ symbol: 'RELIANCE', exchange: 'NSE', interval: '1m', from, to });
+series.setData(bars);
+// Pass seedFrom to continue the last history bar's bucket seamlessly.
+// Pass cumDayVolumeSoFar if the stream reports a cumulative day volume.
+const stopBars = live.subscribeBars(
+  { symbol: 'RELIANCE', exchange: 'NSE', interval: '1m', from, to },
+  (bar) => series.update(bar),
+  { seedFrom: bars[bars.length - 1] },
+);
+
+function disposeChart() {
+  stopBars();
+  chart.destroy();
+}
+```
+
+The optional third argument implements the shared `BarSubscriptionOptions` contract:
+`seedFrom`, `cumDayVolumeSoFar`, and `onResync`. After a successful reconnect, a feed calls
+`onResync`. Subscription replay restores delivery; refresh history as well to repair any
+missed bars. A bare-chart host should buffer arriving live bars while fetching the current
+window with `noCache: true`, merge those observations before `series.setData`, and seed
+the next subscription from the merged last bar. Keep reconnect monitoring active during
+the fetch so a second interruption can supersede the pending repair.
+See [Custom Data Feeds](/docs/data-feeds#continuing-history-and-recovering-a-stream).
+
+With `createWidget(container, { feed: live, ... })`, the widget seeds every subscription
+and performs this history refresh automatically on `onResync`, preserving the visible
+logical range. It merges live bars received during the fetch into refreshed history.
+It keeps the previous chart visible with a stale-history error if the refresh fails or
+returns no bars, with display updates paused but buffering and reconnect monitoring
+still active. Call `widget.reload()` to retry; the request keeps `noCache: true`
+until a load succeeds. `widget.reload()` refreshes the current source without
+resetting the view; a changed symbol, exchange or interval starts a new load.
+The widget owns its subscription; the host still owns closing the feed during teardown.
+
+Optional open interest is a separate feed capability. A feed does not manufacture OI
+from price or volume. If your provider supplies it, map observations to `Bar.oi` and
+declare instrument support as described in [Open interest](/docs/open-interest).
+
+## Long-running chart lifecycle
+
+Keep every unsubscribe returned by a feed or chart event, and release it before
+the chart view goes away. `chart.destroy()` cleans up chart-owned canvases,
+observers, and listeners, but it cannot close a feed that your application
+created:
+
+```ts
+const stopBars = live.subscribeBars(request, onBar, { seedFrom: bars[bars.length - 1] });
+const stopState = chart.on('pan', persistViewport);
+
+function disposeLiveChart() {
+  stopBars();
+  stopState();
+  myStream.close();
+  chart.destroy();
+}
+```
+
+Close any socket or timer your own stream owns during teardown so reconnect and
+heartbeat timers stop. See
+[Performance & Operations](/docs/performance-and-operations) for bounded
+history and browser-memory guidance.
+
+<Callout type="warning">
+Your provider credentials live only in your app or backend, never in committed source. Prefer
+analyzer or sandbox mode while testing the [trade path](/docs/trading).
+</Callout>
+
+A host that loads data without the widget can use `DataLoadingController`, which takes
+`refreshOnBarClose`, `refreshOnGap` and `refreshWindowBars`. `examples/yfinance` shows a custom
+feed behind the widget.
